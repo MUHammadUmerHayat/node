@@ -5,6 +5,8 @@
 #ifndef V8_TORQUE_TYPE_ORACLE_H_
 #define V8_TORQUE_TYPE_ORACLE_H_
 
+#include <memory>
+
 #include "src/torque/contextual.h"
 #include "src/torque/declarable.h"
 #include "src/torque/declarations.h"
@@ -263,6 +265,8 @@ class TypeOracle : public ContextualClass<TypeOracle> {
 
   static void FinalizeAggregateTypes();
 
+  static size_t FreshTypeId() { return Get().next_type_id_++; }
+
  private:
   const Type* GetBuiltinType(const std::string& name) {
     return Declarations::LookupGlobalType(name);
@@ -275,6 +279,7 @@ class TypeOracle : public ContextualClass<TypeOracle> {
   std::vector<std::unique_ptr<AggregateType>> aggregate_types_;
   std::vector<std::unique_ptr<Type>> top_types_;
   std::vector<std::unique_ptr<Namespace>> struct_namespaces_;
+  size_t next_type_id_ = 0;
 };
 
 }  // namespace torque

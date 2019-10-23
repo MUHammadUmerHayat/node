@@ -130,12 +130,6 @@ enum FreeMode { kLinkCategory, kDoNotLinkCategory };
 
 enum class SpaceAccountingMode { kSpaceAccounted, kSpaceUnaccounted };
 
-enum RememberedSetType {
-  OLD_TO_NEW,
-  OLD_TO_OLD,
-  NUMBER_OF_REMEMBERED_SET_TYPES = OLD_TO_OLD + 1
-};
-
 // A free list category maintains a linked list of free memory blocks.
 class FreeListCategory {
  public:
@@ -606,7 +600,7 @@ class MemoryChunk : public BasicMemoryChunk {
       + kSystemPointerSize           // Address owner_
       + kSizetSize                   // size_t progress_bar_
       + kIntptrSize                  // intptr_t live_byte_count_
-      + kSystemPointerSize * NUMBER_OF_REMEMBERED_SET_TYPES  // SlotSet* array
+      + kSystemPointerSize  // SlotSet* sweeping_slot_set_
       + kSystemPointerSize *
             NUMBER_OF_REMEMBERED_SET_TYPES  // TypedSlotSet* array
       + kSystemPointerSize *
@@ -706,6 +700,13 @@ class MemoryChunk : public BasicMemoryChunk {
     return slot_set_[type];
   }
 
+  template <AccessMode access_mode = AccessMode::ATOMIC>
+  SlotSet* sweeping_slot_set() {
+    if (access_mode == AccessMode::ATOMIC)
+      return base::AsAtomicPointer::Acquire_Load(&sweeping_slot_set_);
+    return sweeping_slot_set_;
+  }
+
   template <RememberedSetType type, AccessMode access_mode = AccessMode::ATOMIC>
   TypedSlotSet* typed_slot_set() {
     if (access_mode == AccessMode::ATOMIC)
@@ -715,9 +716,14 @@ class MemoryChunk : public BasicMemoryChunk {
 
   template <RememberedSetType type>
   V8_EXPORT_PRIVATE SlotSet* AllocateSlotSet();
+  SlotSet* AllocateSweepingSlotSet();
+  SlotSet* AllocateSlotSet(SlotSet** slot_set);
+
   // Not safe to be called concurrently.
   template <RememberedSetType type>
   void ReleaseSlotSet();
+  void ReleaseSlotSet(SlotSet** slot_set);
+  void ReleaseSweepingSlotSet();
   template <RememberedSetType type>
   TypedSlotSet* AllocateTypedSlotSet();
   // Not safe to be called concurrently.
@@ -729,12 +735,8 @@ class MemoryChunk : public BasicMemoryChunk {
   template <RememberedSetType type>
   void ReleaseInvalidatedSlots();
   template <RememberedSetType type>
-  V8_EXPORT_PRIVATE void RegisterObjectWithInvalidatedSlots(HeapObject object,
-                                                            int size);
-  // Updates invalidated_slots after array left-trimming.
-  template <RememberedSetType type>
-  void MoveObjectWithInvalidatedSlots(HeapObject old_start,
-                                      HeapObject new_start);
+  V8_EXPORT_PRIVATE void RegisterObjectWithInvalidatedSlots(HeapObject object);
+  void InvalidateRecordedSlots(HeapObject object);
   template <RememberedSetType type>
   bool RegisteredObjectWithInvalidatedSlots(HeapObject object);
   template <RememberedSetType type>
@@ -914,7 +916,7 @@ class MemoryChunk : public BasicMemoryChunk {
   // A single slot set for small pages (of size kPageSize) or an array of slot
   // set for large pages. In the latter case the number of entries in the array
   // is ceil(size() / kPageSize).
-  SlotSet* slot_set_[NUMBER_OF_REMEMBERED_SET_TYPES];
+  SlotSet* sweeping_slot_set_;
   TypedSlotSet* typed_slot_set_[NUMBER_OF_REMEMBERED_SET_TYPES];
   InvalidatedSlots* invalidated_slots_[NUMBER_OF_REMEMBERED_SET_TYPES];
 
@@ -1096,6 +1098,9 @@ class Page : public MemoryChunk {
   void InitializeFreeListCategories();
   void AllocateFreeListCategories();
   void ReleaseFreeListCategories();
+
+  void MoveOldToNewRememberedSetForSweeping();
+  void MergeOldToNewRememberedSets();
 
 #ifdef DEBUG
   void Print();
@@ -2280,8 +2285,10 @@ class V8_EXPORT_PRIVATE PagedSpace
   static const size_t kCompactionMemoryWanted = 500 * KB;
 
   // Creates a space with an id.
-  PagedSpace(Heap* heap, AllocationSpace id, Executability executable,
-             FreeList* free_list);
+  PagedSpace(
+      Heap* heap, AllocationSpace id, Executability executable,
+      FreeList* free_list,
+      CompactionSpaceKind compaction_space_kind = CompactionSpaceKind::kNone);
 
   ~PagedSpace() override { TearDown(); }
 
@@ -2457,7 +2464,11 @@ class V8_EXPORT_PRIVATE PagedSpace
   // Return size of allocatable area on a page in this space.
   inline int AreaSize() { return static_cast<int>(area_size_); }
 
-  virtual bool is_local() { return false; }
+  bool is_compaction_space() {
+    return compaction_space_kind_ != CompactionSpaceKind::kNone;
+  }
+
+  CompactionSpaceKind compaction_space_kind() { return compaction_space_kind_; }
 
   // Merges {other} into the current space. Note that this modifies {other},
   // e.g., removes its bump pointer area and resets statistics.
@@ -2498,7 +2509,7 @@ class V8_EXPORT_PRIVATE PagedSpace
   void DecreaseLimit(Address new_limit);
   void UpdateInlineAllocationLimit(size_t min_size) override;
   bool SupportsInlineAllocation() override {
-    return identity() == OLD_SPACE && !is_local();
+    return identity() == OLD_SPACE && !is_compaction_space();
   }
 
  protected:
@@ -2554,6 +2565,8 @@ class V8_EXPORT_PRIVATE PagedSpace
       int size_in_bytes, AllocationOrigin origin);
 
   Executability executable_;
+
+  CompactionSpaceKind compaction_space_kind_;
 
   size_t area_size_;
 
@@ -3030,10 +3043,12 @@ class V8_EXPORT_PRIVATE PauseAllocationObserversScope {
 
 class V8_EXPORT_PRIVATE CompactionSpace : public PagedSpace {
  public:
-  CompactionSpace(Heap* heap, AllocationSpace id, Executability executable)
-      : PagedSpace(heap, id, executable, FreeList::CreateFreeList()) {}
-
-  bool is_local() override { return true; }
+  CompactionSpace(Heap* heap, AllocationSpace id, Executability executable,
+                  CompactionSpaceKind compaction_space_kind)
+      : PagedSpace(heap, id, executable, FreeList::CreateFreeList(),
+                   compaction_space_kind) {
+    DCHECK_NE(compaction_space_kind, CompactionSpaceKind::kNone);
+  }
 
  protected:
   // The space is temporary and not included in any snapshots.
@@ -3049,9 +3064,12 @@ class V8_EXPORT_PRIVATE CompactionSpace : public PagedSpace {
 // A collection of |CompactionSpace|s used by a single compaction task.
 class CompactionSpaceCollection : public Malloced {
  public:
-  explicit CompactionSpaceCollection(Heap* heap)
-      : old_space_(heap, OLD_SPACE, Executability::NOT_EXECUTABLE),
-        code_space_(heap, CODE_SPACE, Executability::EXECUTABLE) {}
+  explicit CompactionSpaceCollection(Heap* heap,
+                                     CompactionSpaceKind compaction_space_kind)
+      : old_space_(heap, OLD_SPACE, Executability::NOT_EXECUTABLE,
+                   compaction_space_kind),
+        code_space_(heap, CODE_SPACE, Executability::EXECUTABLE,
+                    compaction_space_kind) {}
 
   CompactionSpace* Get(AllocationSpace space) {
     switch (space) {

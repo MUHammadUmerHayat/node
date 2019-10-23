@@ -93,20 +93,6 @@ Builtin* DeclarationVisitor::CreateBuiltin(BuiltinDeclaration* decl,
     }
   }
 
-  if (TorqueBuiltinDeclaration::DynamicCast(decl)) {
-    for (size_t i = 0; i < signature.types().size(); ++i) {
-      const Type* type = signature.types()[i];
-      if (!type->IsSubtypeOf(TypeOracle::GetTaggedType())) {
-        const Identifier* id = signature.parameter_names.size() > i
-                                   ? signature.parameter_names[i]
-                                   : nullptr;
-        Error("Untagged argument ", id ? (id->value + " ") : "", "at position ",
-              i, " to builtin ", decl->name, " is not supported.")
-            .Position(id ? id->pos : decl->pos);
-      }
-    }
-  }
-
   if (const StructType* struct_type =
           StructType::DynamicCast(signature.return_type)) {
     Error("Builtins ", decl->name, " cannot return structs ",
@@ -353,8 +339,9 @@ Callable* DeclarationVisitor::Specialize(
         Declarations::CreateIntrinsic(declaration->name->value, type_signature);
   } else {
     BuiltinDeclaration* builtin = BuiltinDeclaration::cast(declaration);
-    callable = CreateBuiltin(builtin, generated_name, readable_name.str(),
-                             type_signature, *body);
+    callable =
+        CreateBuiltin(builtin, GlobalContext::MakeUniqueName(generated_name),
+                      readable_name.str(), type_signature, *body);
   }
   key.generic->specializations().Add(key.specialized_types, callable);
   return callable;

@@ -90,7 +90,8 @@ namespace torque {
   AST_STATEMENT_NODE_KIND_LIST(V)       \
   AST_DECLARATION_NODE_KIND_LIST(V)     \
   V(Identifier)                         \
-  V(LabelBlock)
+  V(LabelBlock)                         \
+  V(ClassBody)
 
 struct AstNode {
  public:
@@ -792,6 +793,12 @@ struct TypeDeclaration : Declaration {
   Identifier* name;
 };
 
+struct InstanceTypeConstraints {
+  InstanceTypeConstraints() : value(-1), num_flags_bits(-1) {}
+  int value;
+  int num_flags_bits;
+};
+
 struct AbstractTypeDeclaration : TypeDeclaration {
   DEFINE_AST_NODE_LEAF_BOILERPLATE(AbstractTypeDeclaration)
   AbstractTypeDeclaration(SourcePosition pos, Identifier* name, bool transient,
@@ -1054,19 +1061,32 @@ struct ExternConstDeclaration : Declaration {
 
 struct StructDeclaration : TypeDeclaration {
   DEFINE_AST_NODE_LEAF_BOILERPLATE(StructDeclaration)
-  StructDeclaration(SourcePosition pos, Identifier* name,
+  StructDeclaration(SourcePosition pos, StructFlags flags, Identifier* name,
                     std::vector<Declaration*> methods,
                     std::vector<StructFieldExpression> fields,
                     std::vector<Identifier*> generic_parameters)
       : TypeDeclaration(kKind, pos, name),
+        flags(flags),
         methods(std::move(methods)),
         fields(std::move(fields)),
         generic_parameters(std::move(generic_parameters)) {}
+  StructFlags flags;
   std::vector<Declaration*> methods;
   std::vector<StructFieldExpression> fields;
   std::vector<Identifier*> generic_parameters;
 
   bool IsGeneric() const { return !generic_parameters.empty(); }
+};
+
+struct ClassBody : AstNode {
+  DEFINE_AST_NODE_LEAF_BOILERPLATE(ClassBody)
+  ClassBody(SourcePosition pos, std::vector<Declaration*> methods,
+            std::vector<ClassFieldExpression> fields)
+      : AstNode(kKind, pos),
+        methods(std::move(methods)),
+        fields(std::move(fields)) {}
+  std::vector<Declaration*> methods;
+  std::vector<ClassFieldExpression> fields;
 };
 
 struct ClassDeclaration : TypeDeclaration {
@@ -1075,18 +1095,21 @@ struct ClassDeclaration : TypeDeclaration {
                    base::Optional<TypeExpression*> super,
                    base::Optional<std::string> generates,
                    std::vector<Declaration*> methods,
-                   std::vector<ClassFieldExpression> fields)
+                   std::vector<ClassFieldExpression> fields,
+                   InstanceTypeConstraints instance_type_constraints)
       : TypeDeclaration(kKind, pos, name),
         flags(flags),
         super(super),
         generates(std::move(generates)),
         methods(std::move(methods)),
-        fields(std::move(fields)) {}
+        fields(std::move(fields)),
+        instance_type_constraints(std::move(instance_type_constraints)) {}
   ClassFlags flags;
   base::Optional<TypeExpression*> super;
   base::Optional<std::string> generates;
   std::vector<Declaration*> methods;
   std::vector<ClassFieldExpression> fields;
+  InstanceTypeConstraints instance_type_constraints;
 };
 
 struct CppIncludeDeclaration : Declaration {
